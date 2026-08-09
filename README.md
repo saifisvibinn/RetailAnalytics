@@ -28,57 +28,46 @@ Using Kaggle's public **Olist Brazilian E-Commerce Dataset** (~100k orders from 
 
 ```mermaid
 flowchart TD
-    subgraph Landing Layer ["1. Landing Layer (UC Volume)"]
-        CSV["Kaggle Olist CSV Files\n/Volumes/workspace/retail_landing/raw_data/"]
+    subgraph Landing_Layer ["1. Landing Layer (UC Volume)"]
+        CSV["Kaggle Olist CSV Files<br/>/Volumes/workspace/retail_landing/raw_data/"]
     end
 
-    subgraph Bronze Layer ["2. Bronze Layer (Delta - workspace.bronze)"]
-        B_Orders["orders"]
-        B_Items["order_items"]
-        B_Payments["order_payments"]
-        B_Customers["customers"]
-        B_Products["products"]
-        B_Sellers["sellers"]
+    subgraph Bronze_Layer ["2. Bronze Layer (Delta - workspace.bronze)"]
+        B_Tables["Delta Tables:<br/>orders, order_items, order_payments,<br/>customers, products, sellers"]
         B_Meta["+ _ingestion_timestamp & _source_file"]
     end
 
-    subgraph Silver Layer ["3. Silver Layer (Delta - workspace.silver)"]
+    subgraph Silver_Layer ["3. Silver Layer (Delta - workspace.silver)"]
         S_Orders["orders (Typed & Standardized)"]
         S_Items["order_items (Composite Dedup)"]
         S_Payments["order_payments (Composite Dedup)"]
         S_Customers["customers (Initcap Cities)"]
-        S_Products["products (Enriched with English Translation)"]
-        S_Sellers["sellers"]
+        S_Products["products (Enriched with Translation)"]
     end
 
-    subgraph Gold Layer ["4. Gold Layer (Delta - workspace.gold)"]
-        G_FactOrders["fact_orders\n(Order-Item Grain: 113,425 rows)"]
-        G_FactPayments["fact_payments\n(Payment-Line Grain: 103,886 rows)"]
+    subgraph Gold_Layer ["4. Gold Layer (Delta - workspace.gold)"]
+        G_FactOrders["fact_orders (113,425 rows)"]
+        G_FactPayments["fact_payments (103,886 rows)"]
         G_DimDate["dim_date (1,096 rows)"]
-        G_DimCust["dim_customer (96,096 unique customers)"]
+        G_DimCust["dim_customer (96,096 customers)"]
         G_DimProd["dim_product (32,951 products)"]
         G_DimSeller["dim_sellers (3,095 sellers)"]
-        G_DimStatus["dim_order_status (8 valid statuses)"]
+        G_DimStatus["dim_order_status (8 statuses)"]
     end
 
-    subgraph Quality Layer ["5. Automated Quality Checks (04_quality_checks)"]
-        QC1["1. PK Uniqueness Test"]
-        QC2["2. Null Rate Thresholds"]
-        QC3["3. FK Referential Integrity"]
-        QC4["4. Value Range Bounds"]
-        QC5["5. Table Row Thresholds"]
-        QC6["6. Layer Revenue Reconciliation"]
+    subgraph Quality_Layer ["5. Automated Quality Checks (04_quality_checks)"]
+        QC["Validations:<br/>PK Uniqueness | Null Thresholds<br/>FK Integrity | Range Bounds<br/>Row Thresholds | Revenue Reconciliation"]
     end
 
-    subgraph BI Layer ["6. Power BI Desktop"]
-        PBI["Star Schema Dashboard\n(Direct import via Databricks SQL Warehouse)"]
+    subgraph BI_Layer ["6. Power BI Desktop"]
+        PBI["Star Schema Dashboard<br/>(Direct import via Databricks SQL Warehouse)"]
     end
 
-    CSV -->|00_setup & 01_bronze| Bronze Layer
-    Bronze Layer -->|02_silver| Silver Layer
-    Silver Layer -->|03_gold| Gold Layer
-    Gold Layer -->|04_quality_checks| Quality Layer
-    Gold Layer -->|Direct Import| PBI
+    CSV -->|"00_setup & 01_bronze"| Bronze_Layer
+    Bronze_Layer -->|"02_silver"| Silver_Layer
+    Silver_Layer -->|"03_gold"| Gold_Layer
+    Gold_Layer -->|"04_quality_checks"| Quality_Layer
+    Gold_Layer -->|"Direct Import"| BI_Layer
 ```
 
 ---
