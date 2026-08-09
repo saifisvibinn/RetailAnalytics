@@ -1,0 +1,45 @@
+resources:
+  jobs:
+    Retail_Nightly_Pipeline:
+      name: Retail_Nightly_Pipeline
+      email_notifications:
+        on_success:
+          - dragogamer98.ld@gmail.com
+        on_failure:
+          - dragogamer98.ld@gmail.com
+      schedule:
+        quartz_cron_expression: 6 45 20 * * ?
+        timezone_id: Africa/Cairo
+        pause_status: UNPAUSED
+      tasks:
+        - task_key: 00_download_data
+          notebook_task:
+            notebook_path: /Workspace/Users/dragogamer98.ld@gmail.com/RetailAnalytics/notebooks/00_setup
+            source: WORKSPACE
+        - task_key: 01_bronze_ingestion
+          depends_on:
+            - task_key: 00_download_data
+          notebook_task:
+            notebook_path: /Workspace/Users/dragogamer98.ld@gmail.com/RetailAnalytics/notebooks/01_bronze
+            source: WORKSPACE
+        - task_key: 02_Silver_Transform
+          depends_on:
+            - task_key: 01_bronze_ingestion
+          notebook_task:
+            notebook_path: /Workspace/Users/dragogamer98.ld@gmail.com/RetailAnalytics/notebooks/02_silver
+            source: WORKSPACE
+        - task_key: 03_gold_business
+          depends_on:
+            - task_key: 02_Silver_Transform
+          notebook_task:
+            notebook_path: /Workspace/Users/dragogamer98.ld@gmail.com/RetailAnalytics/notebooks/03_gold
+            source: WORKSPACE
+        - task_key: 04_Quality_check
+          depends_on:
+            - task_key: 03_gold_business
+          notebook_task:
+            notebook_path: /Workspace/Users/dragogamer98.ld@gmail.com/RetailAnalytics/notebooks/04_quality_check
+            source: WORKSPACE
+      queue:
+        enabled: true
+      performance_target: PERFORMANCE_OPTIMIZED
