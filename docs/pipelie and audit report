@@ -1,0 +1,341 @@
+# Databricks Pipeline & Power BI Data Model — Full Technical Audit (v3 — Production Final)
+
+**Pipeline:** Olist Brazilian E-Commerce  
+**Catalog:** `workspace`  
+**Layers:** Landing → Bronze → Silver → Gold → Quality Checks  
+**Target BI Tool:** Microsoft Power BI Desktop  
+**Audit Date:** 2026-08-09  
+**Status:** ✅ ALL FIXES & AUTOMATED QUALITY CHECKS APPLIED — Production-Ready  
+
+---
+
+# 1. Architecture Overview
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                          LANDING LAYER                                 │
+│  /Volumes/workspace/retail_landing/raw_data/                          │
+│  9 CSV files downloaded from Kaggle (Olist Brazilian E-Commerce)      │
+└────────────────────────┬───────────────────────────────────────────────┘
+                         │ spark.read.csv → .saveAsTable()
+                         ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                          BRONZE LAYER                                  │
+│  Schema: workspace.bronze                                              │
+│  9 Delta tables (raw data + _ingestion_timestamp + _source_file)      │
+└────────────────────────┬───────────────────────────────────────────────┘
+                         │ Type casting, composite key dedup, joins
+                         ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                          SILVER LAYER                                  │
+│  Schema: workspace.silver                                              │
+│  8 Delta tables (cleaned, typed, deduplicated)                        │
+└────────────────────────┬───────────────────────────────────────────────┘
+                         │ Joins, aggregations, formatting, COALESCE keys
+                         ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                          GOLD LAYER                                    │
+│  Schema: workspace.gold                                                │
+│  8 tables: fact_orders, fact_payments, daily_sales_summary,           │
+│            dim_date, dim_sellers, dim_customer, dim_product,         │
+│            dim_order_status                                            │
+│  Optimizations: OPTIMIZE ... ZORDER BY + ANALYZE TABLE                 │
+└────────────────────────┬───────────────────────────────────────────────┘
+                         │ Automated validations & thresholds
+                         ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                     QUALITY CHECKS LAYER                               │
+│  Notebook: 04_quality_checks                                           │
+│  Tests: PK Uniqueness, Nulls, FK Integrity, Ranges, Row Thresholds    │
+└────────────────────────┬───────────────────────────────────────────────┘
+                         │ Import
+                         ▼
+                     Power BI Desktop
+```
+
+**Notebooks:**
+- `00_setup` — Kaggle download + Volume storage
+- `01_bronze` — CSV → Delta ingestion
+- `02_silver` — Cleaning & transformation (composite key dedup)
+- `03_gold` — Business-ready tables + Delta Optimizations (OPTIMIZE + ZORDER)
+- `04_quality_checks` — Automated data quality validations & assertions
+
+**Orchestration:** Databricks Workflow `Retail_Nightly_Pipeline` (5 sequential tasks)
+
+---
+
+# 2. Table Inventory
+
+## Landing Layer
+
+| File | Approx Rows | Columns |
+|---|---|---|
+| olist_customers_dataset.csv | ~99,441 | 5 |
+| olist_orders_dataset.csv | ~99,441 | 8 |
+| olist_order_items_dataset.csv | ~112,650 | 7 |
+| olist_order_payments_dataset.csv | ~103,886 | 5 |
+| olist_order_reviews_dataset.csv | ~99,224 | 7 |
+| olist_products_dataset.csv | ~32,951 | 9 |
+| olist_sellers_dataset.csv | ~3,095 | 4 |
+| olist_geolocation_dataset.csv | ~1,000,163 | 5 |
+| product_category_name_translation.csv | ~71 | 2 |
+
+## Bronze Layer (`workspace.bronze`)
+
+| Table | Source File | Approx Rows | Columns | Primary Key | Grain |
+|---|---|---|---|---|---|
+| customers | olist_customers_dataset.csv | ~99,441 | 5+2 | customer_id | One row per customer-order mapping |
+| orders | olist_orders_dataset.csv | ~99,441 | 8+2 | order_id | One row per order |
+| order_items | olist_order_items_dataset.csv | ~112,650 | 7+2 | (order_id, order_item_id) | One row per order item |
+| order_payments | olist_order_payments_dataset.csv | ~103,886 | 5+2 | (order_id, payment_sequential) | One row per payment line |
+| order_reviews | olist_order_reviews_dataset.csv | ~99,224 | 7+2 | review_id | One row per review |
+| products | olist_products_dataset.csv | ~32,951 | 9+2 | product_id | One row per product |
+| sellers | olist_sellers_dataset.csv | ~3,095 | 4+2 | seller_id | One row per seller |
+| geolocation | olist_geolocation_dataset.csv | ~1,000,163 | 5+2 | None (no PK) | One row per zip+lat+lng record |
+| product_category_translation | product_category_name_translation.csv | ~71 | 2+2 | product_category_name | One row per category |
+
+> [!NOTE]
+> "+2" columns = `_ingestion_timestamp` (timestamp) and `_source_file` (string), added during Bronze ingestion.
+
+## Silver Layer (`workspace.silver`)
+
+| Table | Source | Transformation | Approx Rows | Dedup Key |
+|---|---|---|---|---|
+| customers | bronze.customers | initcap(city), trim(state) | ~99,441 | customer_id |
+| orders | bronze.orders | Cast 5 date columns to timestamp | ~99,441 | order_id |
+| order_items | bronze.order_items | dropDuplicates on composite key | ~112,650 | (order_id, order_item_id) ✅ |
+| order_payments | bronze.order_payments | dropDuplicates on composite key | ~103,886 | (order_id, payment_sequential) ✅ |
+| order_reviews | bronze.order_reviews | dropDuplicates() (all cols) | ~99,224 | None specified |
+| products | bronze.products JOIN bronze.product_category_translation | Left join on product_category_name | ~32,951 | product_id |
+| sellers | bronze.sellers | dropDuplicates() (all cols) | ~3,095 | None specified |
+| geolocation | bronze.geolocation | dropDuplicates() (all cols) | ~1,000,163 | None specified |
+
+## Gold Layer (`workspace.gold`) — VERIFIED ROW COUNTS & QUALITY CHECKS
+
+| Table | Type | Verified Rows | Distinct Keys | PK Uniqueness Test | Grain |
+|---|---|---|---|---|---|
+| **fact_orders** | Fact | **113,425** | **113,425** | ✅ PASS (COALESCE applied) | One row per order item |
+| **fact_payments** | Fact | **103,886** | **103,886** | ✅ PASS | One row per payment line |
+| **daily_sales_summary** | Aggregate Fact | varies | N/A | ✅ PASS | One row per date + product category |
+| **dim_date** | Dimension | **1,096** | **1,096** | ✅ PASS | One row per calendar date |
+| **dim_customer** | Dimension | **96,096** | **96,096** | ✅ PASS | One row per unique customer |
+| **dim_product** | Dimension | **32,951** | **32,951** | ✅ PASS | One row per product |
+| **dim_sellers** | Dimension | **3,095** | **3,095** | ✅ PASS | One row per seller |
+| **dim_order_status** | Dimension | **8** | **8** | ✅ PASS | One row per order status |
+
+---
+
+# 3. Gold Table Schemas
+
+## `workspace.gold.fact_orders`
+
+| Column | Data Type | Nullable | Source | Business Meaning | Example |
+|---|---|---|---|---|---|
+| order_id | string | No | silver.orders | Unique order identifier | `e481f51cbdc54678b7cc49136f2d6af7` |
+| order_item_id | integer | No | COALESCE(i.order_item_id, 0) | Item sequence within order (0 for no items) | `1`, `2`, `0` |
+| customer_id | string | No | silver.orders | Customer-order mapping ID | `9ef432eb6251297304e76186b10a928d` |
+| customer_unique_id | string | No | silver.customers | True unique customer identifier | `7c396fd4830fd04220f754e42b4e5bff` |
+| order_status | string | No | silver.orders | Current order status | `delivered`, `shipped`, `canceled` |
+| order_purchase_timestamp | timestamp | No | silver.orders | Full purchase timestamp | `2017-10-02 10:56:33` |
+| order_purchase_date | date | No | CAST(timestamp AS DATE) | Order date (dim_date join key) | `2017-10-02` |
+| order_approved_at | timestamp | Yes | silver.orders | When payment was approved | `2017-10-02 11:07:15` |
+| order_delivered_customer_date | timestamp | Yes | silver.orders | When customer received delivery | `2017-10-11 18:00:00` |
+| order_estimated_delivery_date | timestamp | Yes | silver.orders | Estimated delivery date | `2017-10-20 00:00:00` |
+| customer_city | string | No | silver.customers | Customer's city (Initcap) | `Sao Paulo` |
+| customer_state | string | No | silver.customers | Customer's state (2-letter code) | `SP`, `RJ`, `MG` |
+| product_id | string | Yes | silver.order_items | Product identifier | `87c1f2c0fa0ba3ad7e27a4082e2aab7b` |
+| seller_id | string | Yes | silver.order_items | Seller identifier | `48436dade18ac8b2bce089ec2a041c71` |
+| product_category | string | Yes | silver.products | English category (formatted) | `Health Beauty`, `Watches Gifts` |
+| price | double | Yes | silver.order_items | Item sale price in BRL | `29.99`, `149.90` |
+| freight_value | double | Yes | silver.order_items | Shipping cost in BRL | `8.72`, `15.10` |
+| delivery_days | integer | Yes | Calculated | Days from purchase to delivery | `7`, `15`, `null` |
+| is_late_delivery | boolean | Yes | Calculated | Whether delivery was late | `true`, `false` |
+
+**Primary Key:** `(order_id, order_item_id)` — composite (`order_item_id` defaults to 0 via COALESCE)  
+**Foreign Keys:** `customer_unique_id` → dim_customer, `product_id` → dim_product, `seller_id` → dim_sellers, `order_purchase_date` → dim_date, `order_status` → dim_order_status
+
+## `workspace.gold.fact_payments`
+
+| Column | Data Type | Nullable | Source | Business Meaning | Example |
+|---|---|---|---|---|---|
+| order_id | string | No | silver.order_payments | Order identifier | `e481f51cbdc54678b7cc49136f2d6af7` |
+| payment_sequential | integer | No | silver.order_payments | Payment sequence within order | `1`, `2` |
+| customer_id | string | No | silver.orders | Customer-order mapping ID | `9ef432eb6251297304e76186b10a928d` |
+| order_status | string | No | silver.orders | Order status | `delivered`, `canceled` |
+| payment_type | string | No | silver.order_payments | Payment method (formatted) | `Credit Card`, `Boleto` |
+| payment_installments | integer | No | silver.order_payments | Number of installments | `1`, `3`, `10` |
+| payment_value | double | No | silver.order_payments | Payment amount in BRL | `29.99`, `149.90` |
+| order_purchase_timestamp | timestamp | No | silver.orders | When the order was placed | `2017-10-02 10:56:33` |
+| order_purchase_date | date | No | CAST(timestamp AS DATE) | Order date (dim_date join key) | `2017-10-02` |
+| customer_state | string | No | silver.customers | Customer's state | `SP`, `RJ` |
+
+**Primary Key:** `(order_id, payment_sequential)` — composite  
+**Foreign Keys:** `order_purchase_date` → dim_date, `order_status` → dim_order_status
+
+## `workspace.gold.dim_order_status`
+
+| Column | Data Type | Nullable | Business Meaning | Example |
+|---|---|---|---|---|
+| order_status | string | No | Order status name | `delivered`, `shipped`, `canceled` |
+
+**Primary Key:** `order_status`  
+**Row Count:** 8  
+**Values:** `approved`, `canceled`, `created`, `delivered`, `invoiced`, `processing`, `shipped`, `unavailable`
+
+---
+
+# 4. Automated Quality Checks & Delta Optimizations
+
+## Delta Optimizations Applied
+
+```sql
+OPTIMIZE workspace.gold.fact_orders ZORDER BY (order_purchase_date, customer_state);
+OPTIMIZE workspace.gold.fact_payments ZORDER BY (order_purchase_date, payment_type);
+OPTIMIZE workspace.gold.daily_sales_summary ZORDER BY (sales_date);
+
+ANALYZE TABLE workspace.gold.fact_orders COMPUTE STATISTICS FOR ALL COLUMNS;
+ANALYZE TABLE workspace.gold.fact_payments COMPUTE STATISTICS FOR ALL COLUMNS;
+ANALYZE TABLE workspace.gold.dim_customer COMPUTE STATISTICS FOR ALL COLUMNS;
+ANALYZE TABLE workspace.gold.dim_product COMPUTE STATISTICS FOR ALL COLUMNS;
+ANALYZE TABLE workspace.gold.dim_sellers COMPUTE STATISTICS FOR ALL COLUMNS;
+ANALYZE TABLE workspace.gold.dim_date COMPUTE STATISTICS FOR ALL COLUMNS;
+ANALYZE TABLE workspace.gold.dim_order_status COMPUTE STATISTICS FOR ALL COLUMNS;
+```
+
+## Quality Check Results (`04_quality_checks`)
+
+| Test Suite | Metric / Check | Target | Result | Status |
+|---|---|---|---|---|
+| **Test 1: PK Uniqueness** | fact_orders (order_id + order_item_id) | 113,425 / 113,425 | Match | ✅ PASS |
+| **Test 1: PK Uniqueness** | fact_payments (order_id + payment_seq) | 103,886 / 103,886 | Match | ✅ PASS |
+| **Test 1: PK Uniqueness** | dim_customer (customer_unique_id) | 96,096 / 96,096 | Match | ✅ PASS |
+| **Test 1: PK Uniqueness** | dim_product (product_id) | 32,951 / 32,951 | Match | ✅ PASS |
+| **Test 1: PK Uniqueness** | dim_sellers (seller_id) | 3,095 / 3,095 | Match | ✅ PASS |
+| **Test 1: PK Uniqueness** | dim_date (date_key) | 1,096 / 1,096 | Match | ✅ PASS |
+| **Test 1: PK Uniqueness** | dim_order_status (order_status) | 8 / 8 | Match | ✅ PASS |
+| **Test 2: Null Checks** | Critical IDs (`order_id`, `customer_unique_id`) | 0 Nulls | 0 Nulls | ✅ PASS |
+| **Test 2: Null Checks** | `fact_orders.price` | < 5% Nulls | 0.68% (775 nulls) | ✅ PASS |
+| **Test 3: FK Integrity** | fact_orders → dim_customer | 0 Orphans | 0 Orphans | ✅ PASS |
+| **Test 3: FK Integrity** | fact_orders → dim_product | 0 Orphans | 0 Orphans | ✅ PASS |
+| **Test 3: FK Integrity** | fact_orders → dim_sellers | 0 Orphans | 0 Orphans | ✅ PASS |
+| **Test 3: FK Integrity** | fact_orders → dim_order_status | 0 Orphans | 0 Orphans | ✅ PASS |
+| **Test 3: FK Integrity** | fact_payments → dim_order_status | 0 Orphans | 0 Orphans | ✅ PASS |
+| **Test 4: Value Ranges** | Negative prices / freight / payments | 0 Negative | 0 Negative | ✅ PASS |
+| **Test 4: Value Ranges** | Future purchase dates | 0 Future | 0 Future | ✅ PASS |
+| **Test 5: Thresholds** | All Gold table row counts | Above Min Limit | All Above Min | ✅ PASS |
+| **Test 6: Reconciliation** | Silver vs Gold Revenue & Payments | 0 Difference | 0 Difference | ✅ PASS |
+
+---
+
+# 5. Power BI Star Schema & Relationships
+
+```
+                     dim_date          dim_order_status
+                    /   |   \           /          \
+                   /    |    \         /            \
+daily_sales_summary  fact_orders   fact_payments
+                    /    |    \
+                   /     |     \
+          dim_customer dim_product dim_sellers
+```
+
+### Complete Relationship Specification
+
+| From (1 side) | To (* side) | Key | Cardinality | Filter Direction | Active |
+|---|---|---|---|---|---|
+| dim_date | fact_orders | date_key → order_purchase_date | 1:* | Single | Yes |
+| dim_date | fact_payments | date_key → order_purchase_date | 1:* | Single | Yes |
+| dim_date | daily_sales_summary | date_key → sales_date | 1:* | Single | Yes |
+| dim_order_status | fact_orders | order_status → order_status | 1:* | Single | Yes |
+| dim_order_status | fact_payments | order_status → order_status | 1:* | Single | Yes |
+| dim_customer | fact_orders | customer_unique_id → customer_unique_id | 1:* | Single | Yes |
+| dim_product | fact_orders | product_id → product_id | 1:* | Single | Yes |
+| dim_sellers | fact_orders | seller_id → seller_id | 1:* | Single | Yes |
+
+---
+
+## Machine-Readable Summary
+
+```yaml
+pipeline:
+  catalog: workspace
+  layers: [landing, bronze, silver, gold, quality_checks]
+  orchestration: Databricks Workflow (Retail_Nightly_Pipeline - 5 tasks)
+  status: PRODUCTION_FINAL
+
+tables:
+  - name: fact_orders
+    schema: workspace.gold
+    grain: one_row_per_order_item
+    primary_key: [order_id, order_item_id]
+    foreign_keys:
+      - {column: customer_unique_id, references: dim_customer.customer_unique_id}
+      - {column: product_id, references: dim_product.product_id}
+      - {column: seller_id, references: dim_sellers.seller_id}
+      - {column: order_purchase_date, references: dim_date.date_key}
+      - {column: order_status, references: dim_order_status.order_status}
+    row_count: 113425
+    distinct_keys: 113425
+    status: pass
+
+  - name: fact_payments
+    schema: workspace.gold
+    grain: one_row_per_payment_line
+    primary_key: [order_id, payment_sequential]
+    foreign_keys:
+      - {column: order_purchase_date, references: dim_date.date_key}
+      - {column: order_status, references: dim_order_status.order_status}
+    row_count: 103886
+    distinct_keys: 103886
+    status: pass
+
+  - name: dim_customer
+    schema: workspace.gold
+    grain: one_row_per_unique_customer
+    primary_key: customer_unique_id
+    row_count: 96096
+    status: pass
+
+  - name: dim_product
+    schema: workspace.gold
+    grain: one_row_per_product
+    primary_key: product_id
+    row_count: 32951
+    status: pass
+
+  - name: dim_sellers
+    schema: workspace.gold
+    grain: one_row_per_seller
+    primary_key: seller_id
+    row_count: 3095
+    status: pass
+
+  - name: dim_date
+    schema: workspace.gold
+    grain: one_row_per_calendar_date
+    primary_key: date_key
+    row_count: 1096
+    status: pass
+
+  - name: dim_order_status
+    schema: workspace.gold
+    grain: one_row_per_order_status
+    primary_key: order_status
+    row_count: 8
+    status: pass
+
+quality_checks:
+  automated_notebook: 04_quality_checks
+  suites:
+    - pk_uniqueness: PASS
+    - null_checks: PASS
+    - referential_integrity: PASS
+    - range_checks: PASS
+    - row_thresholds: PASS
+    - revenue_reconciliation: PASS
+
+optimizations:
+  fact_orders: ZORDER BY (order_purchase_date, customer_state)
+  fact_payments: ZORDER BY (order_purchase_date, payment_type)
+  daily_sales_summary: ZORDER BY (sales_date)
+```
